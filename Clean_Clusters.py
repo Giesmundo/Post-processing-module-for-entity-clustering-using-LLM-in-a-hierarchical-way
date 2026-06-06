@@ -21,19 +21,36 @@ KEY = "OPENAI_KEY"
 
 MODELS = [MODELLO1, MODELLO2, MODELLO3]
 
-prompt = """In Input hai un dict con chiavi (int, str, str, str) e valore BOOL, ingora l'int, rappresentano: 
-"Id della menzione, titolo del cluster, testo della menzione, contesto della menzione" : BOOL
-per ogni chiave se il testo della menzione e il titolo del cluster riferiscono alla stessa entità assegna alla chiave il valore TRUE, altrimenti FALSE,
-verifica la coerenza tra testo e titolo anche in base al contesto che presenta le parole prima e dopo la menzione,
-considera anche nomignoli, sinonimi, soprannomi e qualsiasi altro modo in cui un entità possa essere riferita, soprattuto rigurdo a persone.
-Se invece il testo della menzione non è presente nel contesto o è una sottostringa di un altra parola del contesto, assegna None.
-Ritorna un dict con le stesse chiavi tranne la str:context e valori booleani aggiornati in formato JSON valido.
+prompt = """Ricevi in input un dizionario JSON con nel formato "id": [titolo_cluster, testo_menzione, contesto_menzione].
+
+Crea un oggetto json valido con chiave id e valore un Boolean o null seguendo queste regole:
+
+Per ogni valore [titolo_cluster, testo_menzione, contesto_menzione]:
+- Il campo "contesto" contiene le parole prima e dopo la menzione nel testo originale, compreso testo_menzione.
+
+Assegna il valore seguendo queste regole in ordine:
+1. Se il testo_menzione NON è presente in contesto_menzione, oppure è sottostringa di un'altra parola del contesto_menzione (es. MAGGIO in MAGGIORANZA) assegna null
+2. Se testo_menzione e titolo_cluster riferiscono alla stessa entità, verifica analizzando contesto_menzione, assegna True
+3. Altrimenti assegna False
+
+Per la regola 2, considera:
+- Sinonimi, nomignoli, soprannomi, abbreviazioni
+- Nomi parziali (es. "Mario" per "Mario Rossi")
+- Qualsiasi altro riferimento indiretto alla stessa entità, specialmente per persone
+
+Rispondi ESCLUSIVAMENTE con un oggetto JSON valido.
+- Usa come chiave SOLO l'id
+- Esempio: ("329": true, "412": false, "87": null)
+- Includi TUTTE le chiavi, nessuna esclusa
+- Nessun testo aggiuntivo, nessun markdown, nessuna spiegazione
+
 Input:
 {}"""
 
 prompt2 = """"""
 
 model_curr = 0
+volta = 0                     #DEBUG
 client = genai.Client(api_key=API_KEY)
 client2 = OpenAI(api_key=KEY)
 
@@ -45,9 +62,9 @@ def separate_doc(clusters: list) -> dict[str, list]:   # separa i cluster per do
 
     return doc_clusters
 
-def separate_mentions(clusters: list) -> dict[tuple[int, str, str, str], bool]: # separa le singole menzioni
-
-    mentions : dict[tuple[int, str, str, str], bool] = defaultdict(bool)
+def separate_mentions(clusters: list) -> dict[int, tuple[str, str, str]]: # separa le singole menzioni
+    
+    mentions: dict[int, tuple[str, str, str]] = defaultdict(tuple)
 
     for cluster in clusters:
         title = cluster.get("title")
@@ -57,11 +74,11 @@ def separate_mentions(clusters: list) -> dict[tuple[int, str, str, str], bool]: 
             id = mention.get("id")
             text = mention.get("text") 
             context = mention.get("context")
-            mentions[(id, title, text, context)] = False
+            mentions[id] = (title, text, context)
     return mentions
 
-def process_Mentions_parallel(Sep_M: dict[str, dict[tuple[int, str, str, str], bool]],  # invia al LLM i gruppi di menzioni in parallelo
-                              max_workers: int = 8) -> dict[str, dict[tuple[int, str, str], bool]]: # e ritorna le menzioni con valori aggiornati
+def process_Mentions_parallel(Sep_M: dict[str, dict[int, tuple[str, str, str]]],  # invia al LLM i gruppi di menzioni in parallelo
+                              max_workers: int = 8) -> dict[str, dict[int, bool]]: # e ritorna le menzioni con valori aggiornati
 
     def chunked(d: dict):   # divide la lista di menzioni in chunk da 70 menzioni l'uno
         items = list(d.items())
@@ -112,7 +129,7 @@ def process_Mentions_parallel(Sep_M: dict[str, dict[tuple[int, str, str, str], b
 
     return Checked_mentions
 
-def call_llm(diz: dict, prompt: str, retry: int = 20, delay: float = 5.0) -> dict[tuple[int, str, str], bool]: # chimata a LLM
+def call_llm(diz: dict, prompt: str, retry: int = 20, delay: float = 5.0) -> dict[int, bool]: # chimata a LLM
 
     global volta              #DEBUG
     with volta_lock:          #DEBUG
@@ -120,10 +137,10 @@ def call_llm(diz: dict, prompt: str, retry: int = 20, delay: float = 5.0) -> dic
         n = volta             #DEBUG
 
     diz_ = {
-            f"{k[0]}|{k[1]}|{k[2]}|{k[3]}": v 
+            str(k): [v[0], v[1], v[2]]
             for k, v in diz.items()
             }
-    Prompt = prompt.format(json.dumps(diz_, ensure_ascii=False, indent=2))
+    Prompt = prompt.replace("{}", json.dumps(diz_, ensure_ascii=False, indent=2), 1)
     print("chiamata modello per menzioni n. " + str(n)) #DEBUG  
     for model in MODELS:
         for attempt in range(retry):
@@ -142,12 +159,8 @@ def call_llm(diz: dict, prompt: str, retry: int = 20, delay: float = 5.0) -> dic
                     raise ValueError("La risposta del modello non contiene un JSON valido.")
                 result_ = json.loads(text)
                 Result = {}
-                for key_str, value in result_.items():
-                    parts = key_str.split("|", 2)
-                    mention_id = int(parts[0])
-                    title = parts[1]
-                    text = parts[2]
-                    Result[(mention_id, title, text)] = value
+                for key, value in result_.items():
+                    Result[int(key)] = value
                 print("fine chiamata n. " + str(n)) #DEBUG
                 return Result
             
@@ -164,7 +177,7 @@ def call_llm(diz: dict, prompt: str, retry: int = 20, delay: float = 5.0) -> dic
 
     raise RuntimeError("Tutti i modelli hanno esaurito la quota.")
 
-def clean_clusters(clusters: dict[str, list], C_mentions: dict[str, dict[tuple[int, str, str], bool]]) -> list: # pulisce i cluster
+def clean_clusters(clusters: dict[str, list], C_mentions: dict[str, dict[int, bool]]) -> list: # pulisce i cluster
 
     for doc_id, cluster_list in clusters.items():
         orphans = []
@@ -174,20 +187,25 @@ def clean_clusters(clusters: dict[str, list], C_mentions: dict[str, dict[tuple[i
             continue
         for cluster in cluster_list:
             T_mentions = []
-            source_type = cluster.get("type")
-            id_cluster = cluster.get("clusterId")
-            cluster_title = cluster.get("title")
             for mention in cluster.get("mentions"):
                 if mention is None:
                     continue
                 mention_id = mention.get("id")
-                mention_text = mention.get("text")
-                mention_value = mentions_dict[(mention_id, cluster_title, mention_text)]
+                try:
+                    mention_value = mentions_dict[(mention_id)]
+                except:
+                    print("errore nel documento:", doc_id)
+                    print("mention_id:", mention_id)
+                    raise KeyError("Menzione non trovata")
                 if mention_value is None:
-                    print("MENZIONE NULLA - testo: " + mention_text + " id: " + str(mention_id) + " Cluster: " + cluster_title)   #DEBUG
+                    print("MENZIONE NULLA", mention_id, "documento:", doc_id)   #DEBUG
                     continue
                 else:
                     if not mention_value:
+                        mention_text = mention.get("text")
+                        cluster_title = cluster.get("title")
+                        source_type = cluster.get("type")
+                        id_cluster = cluster.get("clusterId")
                         print("testo: " + mention_text + " id: " + str(mention_id) + " Cluster: " + cluster_title)   #DEBUG
                         new_cluster = {
                             "originalDocId": doc_id,
@@ -214,9 +232,9 @@ def run(input_path: str = INPUT_PATH, output_path: str = OUTPUT_PATH):
 
     Sep_D: dict[str, list] = separate_doc(clusters)
 
-    Sep_M: dict[str, dict[tuple[int, str, str, str], bool]] = {doc_id: separate_mentions(clusters) for doc_id, clusters in Sep_D.items()}
+    Sep_M: dict[str, dict[int, tuple[str, str, str]]] = {doc_id: separate_mentions(clusters) for doc_id, clusters in Sep_D.items()}
     
-    all_Checked_mentions: dict[str, dict[tuple[int, str, str], bool]] = process_Mentions_parallel(Sep_M)
+    all_Checked_mentions: dict[str, dict[int, bool]] = process_Mentions_parallel(Sep_M)
 
     all_Cleaned_clusters: list = clean_clusters(Sep_D, all_Checked_mentions)
     
