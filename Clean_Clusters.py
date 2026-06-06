@@ -61,7 +61,7 @@ def separate_mentions(clusters: list) -> dict[tuple[int, str, str, str], bool]: 
     return mentions
 
 def process_Mentions_parallel(Sep_M: dict[str, dict[tuple[int, str, str, str], bool]],  # invia al LLM i gruppi di menzioni in parallelo
-                              max_workers: int = 4) -> dict[str, dict[tuple[int, str, str], bool]]: # e ritorna le menzioni con valori aggiornati
+                              max_workers: int = 8) -> dict[str, dict[tuple[int, str, str], bool]]: # e ritorna le menzioni con valori aggiornati
 
     def chunked(d: dict):   # divide la lista di menzioni in chunk da 70 menzioni l'uno
         items = list(d.items())
@@ -204,14 +204,13 @@ def clean_clusters(clusters: dict[str, list], C_mentions: dict[str, dict[tuple[i
         print(f"documento pulito: {doc_id}") #DEBUG
 
     return [c for c in clusters.values()]
+
 def run(input_path: str = INPUT_PATH, output_path: str = OUTPUT_PATH):
     I = Path(input_path)
     O = Path(output_path)
 
     with I.open(encoding="utf-8") as f:
-        data = json.load(f)
-   
-    clusters: list = data
+        clusters: list= json.load(f)
 
     Sep_D: dict[str, list] = separate_doc(clusters)
 
