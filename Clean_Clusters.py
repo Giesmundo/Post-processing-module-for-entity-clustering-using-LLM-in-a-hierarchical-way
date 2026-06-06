@@ -24,15 +24,16 @@ MODELS = [MODELLO1, MODELLO2, MODELLO3]
 prompt = """In Input hai un dict con chiavi (int, str, str, str) e valore BOOL, ingora l'int, rappresentano: 
 "Id della menzione, titolo del cluster, testo della menzione, contesto della menzione" : BOOL
 per ogni chiave se il testo della menzione e il titolo del cluster riferiscono alla stessa entità assegna alla chiave il valore TRUE, altrimenti FALSE,
-usa anche il contesto della menzione,
-ritorna un dict con le stesse chiavi tranne la str:context e valori booleani aggiornati in formato JSON valido.
+verifica la coerenza tra testo e titolo anche in base al contesto che presenta le parole prima e dopo la menzione,
+considera anche nomignoli, sinonimi, soprannomi e qualsiasi altro modo in cui un entità possa essere riferita, soprattuto rigurdo a persone.
+Se invece il testo della menzione non è presente nel contesto o è una sottostringa di un altra parola del contesto, assegna None.
+Ritorna un dict con le stesse chiavi tranne la str:context e valori booleani aggiornati in formato JSON valido.
 Input:
 {}"""
 
 prompt2 = """"""
 
 model_curr = 0
-volta = 0                     #DEBUG
 client = genai.Client(api_key=API_KEY)
 client2 = OpenAI(api_key=KEY)
 
@@ -175,30 +176,34 @@ def clean_clusters(clusters: dict[str, list], C_mentions: dict[str, dict[tuple[i
             T_mentions = []
             source_type = cluster.get("type")
             id_cluster = cluster.get("clusterId")
+            cluster_title = cluster.get("title")
             for mention in cluster.get("mentions"):
                 if mention is None:
                     continue
-                id = mention.get("id")
-                for mention_key, value in mentions_dict.items():
-                    if mention_key[0] == id:
-                        if not value:
-                            print("testo: " + mention_key[2] + " id: " + str(mention_key[0]) + " Cluster: " + mention_key[1])   #DEBUG
-                            new_cluster = {
-                                "originalDocId": doc_id,
-                                "clusterId": id_cluster + "_orphan_" + mention_key[2],
-                                "title": mention_key[2],
-                                "type": source_type,
-                                "mentions": [mention],
-                            }
-                            orphans.append(new_cluster)
-                        else:
-                            T_mentions.append(mention)
+                mention_id = mention.get("id")
+                mention_text = mention.get("text")
+                mention_value = mentions_dict[(mention_id, cluster_title, mention_text)]
+                if mention_value is None:
+                    print("MENZIONE NULLA - testo: " + mention_text + " id: " + str(mention_id) + " Cluster: " + cluster_title)   #DEBUG
+                    continue
+                else:
+                    if not mention_value:
+                        print("testo: " + mention_text + " id: " + str(mention_id) + " Cluster: " + cluster_title)   #DEBUG
+                        new_cluster = {
+                            "originalDocId": doc_id,
+                            "clusterId": id_cluster + "_orphan_" + mention_text,
+                            "title": mention_text,
+                            "type": source_type,
+                            "mentions": [mention],
+                        }
+                        orphans.append(new_cluster)
+                    else:
+                        T_mentions.append(mention)
             cluster["mentions"] = T_mentions
         clusters[doc_id].extend(orphans)
         print(f"documento pulito: {doc_id}") #DEBUG
 
     return [c for c in clusters.values()]
-
 def run(input_path: str = INPUT_PATH, output_path: str = OUTPUT_PATH):
     I = Path(input_path)
     O = Path(output_path)
