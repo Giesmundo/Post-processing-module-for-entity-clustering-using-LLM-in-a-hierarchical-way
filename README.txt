@@ -1,34 +1,10 @@
-Documentazione Clean_Clusters.py
+Documentazione Clean_Clusters.py e Merge_Clusters.py
 
-logica:
+logica CC:
+mandare al LLM i json di cluster con menzioni di singoli documenti di un singolo tipo, ritorna un dict in cui vengono segnati gli id dell emznioni da eliminare o da spostare
+eseguire l'eliminazione e lo spostamento manualmente
 
-Far fare al LLM il minimo indispensabile, facendoli aggiornare dei valori booleani a seconda che una menzione faccia parte del cluster o meno, e creare cluster nuovi con menzioni orfane da se.
-Creare un dict[doc_id, clusters_list] per ogni documento, partendo dalle clusters_list creare un
-dict[doc_id, dict[mention_id, [cluster_title, mention_text, mention_context]]]
-passare al LLM il dict[int, [cluster_title, mention_text, mention_context]] e fargli creare e ritornare un dict[int, bool] dove il bool può essere true, false, none a seconda
-che, rispettivamente, la menzione: riferisce alla stessa entità del cluster, non riferisce alla stessa entità del cluster, non dovrebbe essere una menzione.
-
-Implementazione:
-
-separate_doc:
-
-partendo dalla lista presa dal file in I, separa i cluster per ogni documento creando un dict[doc_id, clusters_list].
-
-separate_mentions:
-
-partendo dalle singole clusters_list, separa le menzioni creando un dict con solo le informazioni necessarie per verificare se una menzione faccia parte di un cluster o meno.
-Ritorna un dict[mention_id, [cluster_title, mention_text, mention_context]] che viene poi messo come valore a dict[doc_id, …
-
-process_mentions_parallel:
-
-partendo dal dict di menzioni, per ogni documento prende le menzioni, le divide in chunk di grandezza prefissata con controllo di resti ed 	effettua chiamate parallele (8 per volta) al LLM con in I i chunk di menzioni tenendo traccia dell’ordine, aggiornando e ritornando il dict[doc_id, dict[mention_id, bool]] delle menzioni con quelle revisionate dal LLM.
-
-call_llm:
-
-partendo dal chunk di menzioni, lo serializza e lo unisce al prompt, prova a chiamare l’LLM e pulisce il risultato creando un dict[mention_id, bool] che ritorna.
-
-clean_clusters:
-
-partendo dal dict[doc_id, clusters_list] di separate_doc e daldict[doc_id, dict[mention_id, bool]] di process_mentions_parallel passa ogni menzione di ogni cluster di ogni documento e controlla 
-confrontando le menzioni con il mention_id, se riferiscano al giusto elemento,se hanno valore Null le scarta, se hanno valore False crea un cluster nuovo solo per loro(aspettando merge_clusters)
-se hanno valore true le lascia al loro posto.
+logica MC:
+mandare al LLM i titoli con id dei cluster di singoli documenti di un singolo tipo, ritorna un dict in cui vengono raggruppati gli id di cluster che si riferiscono alla stessa entità
+successivamente prendere i titoli e gli id dei cluster di un singolo tipo di tutti i doucmenti, mandarli al LLM e nel caso siano troppo grandi suddividerli e usare una struttura ad albero per raggruppare i gruppi, una volta processati, mischiandoli per evitare la perdita di focus del LLM.
+eseguire l'unione dei cluster manualmente.
