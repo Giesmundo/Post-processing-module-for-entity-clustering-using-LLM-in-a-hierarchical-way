@@ -11,31 +11,30 @@ volta_lock = threading.Lock() #DEBUG
 volta = 0                     #DEBUG
 
 OUTPUT_PATH = r"D:\Tesi PY\Clusters_Puliti.json"
-GROUND_TRUTH = r"D:\Tesi PY\GROUND_TRUTH.json"
-API_KEY = "genai_api_key"
-MODELLO1 =  "gemini-3.5-flash"
-MODELLO2 = "gemini-3.1-flash-lite"
-MODELLO3 =  "gemini-3-flash-preview"
-MODELS = [MODELLO1, MODELLO2, MODELLO3]
+GROUND_TRUTH = r"D:\Tesi PY\C_GROUND_TRUTH_O.json"
+MODELS = ["gemini-3.5-flash", "gemini-3.1-flash-lite", "gemini-3-flash-preview"]
 CLAUDE_MODELS = ["claude-haiku-4-5-20251001", "claude-sonnet-5", "claude-opus-4-8"]  # dal più economico al più capace
 
 prompt = """I tuo compito è quello di verificare che due stringhe siano riferite ad una stessa entità, usando le parole prime e dopo la seconda stringa.
-In Input hai una lista di Cluster, di uno stesso tipo, e le menzioni di ogni clutser, cioè le ricorrenze dell'entità del cluster:
+In Input hai una lista di Cluster, e le menzioni di ogni clutser, cioè le ricorrenze dell'entità del cluster:
 verifica l'appartenenza di ogni menzione comparando title dei cluster e text delle menzioni
-usando anche il context delle menzioni che presenta le parole prima e dopo al text.
-Per le menzioni di tipo "persona" tieni conto anche di nomignoli, soprannomi e varianti del nome.
-In output crea un dict(str, list) e inserisci:
-in ELIMINARE le menzioni il cui text NON è presente nel proprio context, 
-in SPOSTARE le menzioni il cui text è giusto ma NON si rifersice al cluster in cui si trova
+usando anche, se c'è, il context delle menzioni che presenta le parole prima e dopo al text.
+In output crea un dict(str, list), la lista di interi, e inserisci:
+in ELIMINARE le menzioni il cui text NON è presente nel proprio context, se c'è. 
+in SPOSTARE le menzioni il cui text è giusto ma NON si rifersice al cluster in cui si trova.
 OUTPUT es:
 {"ELIMINARE":[ID_ES1, ID_ES2], "SPOSTARE": [ID_ES3, ID_ES4]}
 Rispondi SOLO CON JSON VALIDO, senza testo prima o dopo, senza esempi, senza markdown.
 Input:
 {}"""
 
-Gtr: dict[bool, int] = {True: 0, False: 0}
-model_curr = 0
-client = genai.Client(api_key=API_KEY)
+Tot_Predette = 0
+Tot_Corrette = 0
+Tot_Gt = 0
+with_context = True
+with_type = True
+modello_corrente = 0
+client = genai.Client(api_key="genai_api_key")
 client_claude = anthropic.Anthropic(api_key="anthropic_api_key")
 
 
@@ -52,17 +51,18 @@ def separate_doc(clusters: list) -> dict[str, list]:   # separa i cluster per do
 
     return doc_clusters
 
-def separate_for_types(clusters: list) -> dict[str, list]: # separa le singole menzioni
+def separate_clusters(clusters: list) -> dict[int, list]: # separa le singole menzioni
 
-    print("inizio separate_for_types")
-
-    mentions: dict[str, list] = defaultdict(list)
+    mentions: dict[int, list] = defaultdict(list)
+    n = 0
+    max = 20
     for cluster in clusters:
-        source_type = cluster.get("type")
-        mentions[source_type].append(cluster)
-
-    print("fine separate_for_types")
-
+        if len(cluster) > max - len(mentions[n]):
+            n += 1
+            mentions[n].append(cluster)
+        else:
+            mentions[n].append(cluster)
+    print("numero di batch: ", n)
     return mentions
 
 def process_clusters_parallel(Sep_C: dict[str, list], max_workers: int) -> dict[str, list]:
@@ -74,7 +74,7 @@ def process_clusters_parallel(Sep_C: dict[str, list], max_workers: int) -> dict[
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         tasks = {}
         for S_type, cluster_list in Sep_C.items():
-            future_obj = executor.submit(call_llm, cluster_list, prompt)
+            future_obj = executor.submit(A_call_llm, cluster_list, prompt)
             tasks[future_obj] = (S_type)
 
         for task in as_completed(tasks):
@@ -87,7 +87,7 @@ def process_clusters_parallel(Sep_C: dict[str, list], max_workers: int) -> dict[
     print("fine process_cluster_parallel")
     return to_change_ids
 
-def call_llm(cluster_list: list, prompt: str, retry: int = 10, delay: float = 5.0) -> dict[str, list]: # chimata a LLM
+def A_call_llm(cluster_list: list, prompt: str, retry: int = 10, delay: float = 5.0) -> dict[str, list]: # chimata a LLM
 
     global volta              #DEBUG
     with volta_lock:          #DEBUG
@@ -140,6 +140,41 @@ def call_llm(cluster_list: list, prompt: str, retry: int = 10, delay: float = 5.
 
     raise RuntimeError("Tutti i modelli hanno esaurito la quota.")
 
+def G_call_llm(cluster_list: list, prompt: str, retry: int = 10, delay: float = 5.0) -> dict[str, list]:
+    global modello_corrente
+    for modello in MODELS:
+        for attempt in range(retry):
+            try:
+                Prompt = prompt.replace("{}", json.dumps(cluster_list, ensure_ascii=False, indent=2), 1)
+                response = client.models.generate_content(model=modello, contents=Prompt)
+                text = response.text.strip()
+                start = text.find('{')
+                end = text.rfind('}')
+                if start != -1 and end != -1:
+                    text = text[start:end+1]
+                else:
+                    raise ValueError("La risposta del modello non contiene un JSON valido.")
+                result_ = json.loads(text)
+
+                Result = {
+                    "SPOSTARE": [int(x) for x in result_.get("SPOSTARE", [])],
+                    "ELIMINARE": [int(y) for y in result_.get("ELIMINARE", [])]
+                }
+                return Result
+            except Exception as e:
+                err = str(e)
+                if "429" in err or "RESOURCE_EXHAUSTED" in err:
+                    print(modello + " esaurito")
+                    modello_corrente += 1
+                    break
+                print(f"[{modello}] Tentativo {attempt+1}/{retry} fallito: {e}")
+                if attempt < retry - 1:
+                    time.sleep(delay)
+                else:
+                    modello_corrente += 1
+                    break
+    raise RuntimeError("Tutti i modelli hanno esaurito la quota.")
+
 def clean_clusters(cluster_list: list, to_change: dict[str, list]) -> list: # pulisce i cluster
     
     print("inizio clean_cluster")
@@ -160,17 +195,25 @@ def clean_clusters(cluster_list: list, to_change: dict[str, list]) -> list: # pu
                 continue
             if mention_id in sposta_ids:
                 print("SPOSTATA: ", mention_id, " Cluster: ", cluster.get("title"), " Menzione: ", mention.get("text"))
-                source_type = cluster.get("type")
                 id_cluster = cluster.get("clusterId")
                 doc_id = cluster.get("originalDocId")
                 mention_text = mention.get("text")
-                new_cluster = {
-                    "originalDocId": doc_id,
-                    "clusterId": str(id_cluster) + "_orphan_" + str(n),
-                    "title": mention_text,
-                    "type": source_type,
-                    "mentions": [mention],
-                }
+                if with_type:
+                    source_type = cluster.get("type")
+                    new_cluster = {
+                        "originalDocId": doc_id,
+                        "clusterId": str(id_cluster) + "_orphan_" + str(n),
+                        "title": mention_text,
+                        "type": source_type,
+                        "mentions": [mention],
+                    }
+                else:
+                    new_cluster = {
+                        "originalDocId": doc_id,
+                        "clusterId": str(id_cluster) + "_orphan_" + str(n),
+                        "title": mention_text,
+                        "mentions": [mention],
+                    }
                 N_clusters.append(new_cluster)
                 n += 1
                 continue
@@ -180,8 +223,11 @@ def clean_clusters(cluster_list: list, to_change: dict[str, list]) -> list: # pu
     print("fine clean_cluster")
     return cluster_list
 
-def check_ground_truth(doc_id: str, to_change: dict[str, list], gt: dict) -> dict[str, int]:
+def check_ground_truth(doc_id: str, to_change: dict[str, list], gt: dict):
 
+    global Tot_Predette
+    global Tot_Corrette
+    global Tot_Gt
     print("inizio check_ground_truth")
 
     falso_positivo_E = 0
@@ -218,12 +264,26 @@ def check_ground_truth(doc_id: str, to_change: dict[str, list], gt: dict) -> dic
     print("menzioni eliminate erroneamente: ", falso_positivo_E)
     print("menzioni non spostate: ", falso_negativo_S)
     print("menzioni non eliminate: ", falso_negativo_E)
-    print("correttezza totale: ", (vero_positivo_S + vero_positivo_E) / (vero_positivo_S + vero_positivo_E + falso_positivo_S + falso_positivo_E) * 100, " %")
+    tot_predette = vero_positivo_S + vero_positivo_E + falso_positivo_S + falso_positivo_E
+    tot_gt = len(gt_sposta) + len(gt_elimina)
+    tot_corrette = vero_positivo_S + vero_positivo_E
+    Tot_Corrette += tot_corrette
+    Tot_Predette += tot_predette
+    Tot_Gt += tot_gt
+    precision = (tot_corrette / tot_predette * 100) if tot_predette > 0 else 0
+    recall = (tot_corrette / tot_gt * 100) if tot_gt > 0 else 0
+    f1 = (2 * precision * recall / (precision + recall)) if (precision + recall) > 0 else 0
 
-    return to_change
+    print("Precisione (corrette su predette):", precision, " %")
+    print("Recall (corrette su totale GT): ", recall, " %")
+    print("F1 score: ", f1, " %")
 
 def run(input_path: str, output_path: str = OUTPUT_PATH):
     inizio = time.perf_counter()
+
+    global Tot_Corrette
+    global Tot_Gt
+    global Tot_Predette
 
     I = Path(input_path)
     O = Path(output_path)
@@ -236,8 +296,21 @@ def run(input_path: str, output_path: str = OUTPUT_PATH):
 
     Sep_D: dict[str, list] = separate_doc(clusters)
 
-    Sep_C: dict[str, dict[str, list]] = {doc_id: separate_for_types(clusters) for doc_id, clusters in Sep_D.items()}
+    Sep_C: dict[str, dict[int, list]] = {doc_id: separate_clusters(clusters) for doc_id, clusters in Sep_D.items()}
 
+    if not(with_context):
+        for doc_id, batches in Sep_C.items():
+            for _, clusters_list in batches.items():
+                for cluster in clusters_list:
+                    for mention in cluster["mentions"]:
+                        del mention["context"]
+
+    if not(with_type):
+        for doc_id, batches in Sep_C.items():
+            for _, clusters_list in batches.items():
+                for cluster in clusters_list:
+                    del cluster["type"]
+                    
     Cleaned_documents: list = []
 
     for doc_id, clusters_lists in Sep_C.items():
@@ -247,11 +320,18 @@ def run(input_path: str, output_path: str = OUTPUT_PATH):
 
         document_clusters = Sep_D[doc_id]
 
-        to_change_corretto: dict[str, list] = check_ground_truth(doc_id, to_change, gt)
+        check_ground_truth(doc_id, to_change, gt)
 
-        Cleaned_clusters = clean_clusters(document_clusters, to_change_corretto)
+        Cleaned_clusters = clean_clusters(document_clusters, to_change)
 
         Cleaned_documents.extend(Cleaned_clusters)
+
+    precision = (Tot_Corrette / Tot_Predette * 100) if Tot_Predette > 0 else 0
+    recall = (Tot_Corrette / Tot_Gt * 100) if Tot_Gt > 0 else 0
+    f1 = (2 * precision * recall / (precision + recall)) if (precision + recall) > 0 else 0
+    print("Precisione totale corpus:", precision, " %")
+    print("Recall totale corpus: ", recall, " %")
+    print("F1 totale corpus: ", f1, " %")
 
     with O.open("w", encoding="utf-8") as f:
         json.dump(Cleaned_documents, f, ensure_ascii=False, indent=2)
