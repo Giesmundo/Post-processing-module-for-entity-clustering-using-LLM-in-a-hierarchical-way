@@ -4,24 +4,6 @@ import time
 from pathlib import Path
 import json
 
-"""
-i = r""
-o = r""
-I = Path(i)
-O = Path(o)
-with I.open(encoding="utf-8") as f:
-    clusters: list = json.load(f)
-
-cls: list = []
-for cluster in clusters:
-    cls.append(cluster.get("title"))
-
-with O.open("w", encoding="utf-8") as f:
-    json.dump(cls, f, ensure_ascii=False, indent=2)
-
-raise RuntimeError
-"""
-
 inizio = time.perf_counter()
 with open(r"D:\Tesi PY\errors\errori.txt", "w") as f:
     f.write("")
