@@ -31,8 +31,8 @@ m = 0
 modello_corrente= 0
 tot_I_tokens = 0
 tot_O_tokens = 0
-client = genai.Client(api_key="")
-client_claude = anthropic.Anthropic(api_key="")
+client = genai.Client(api_key="genai_key")
+client_claude = anthropic.Anthropic(api_key="anthropic_key")
 _encoder = tiktoken.get_encoding("cl100k_base")
 
 def count_tokens(text: str) -> int:
@@ -67,6 +67,24 @@ def separate_clusters(clusters: list, batch_length: int, P: int = 0) -> dict: # 
             else:
                 titles[n].append((id_sliced, title))
                 random.shuffle(titles[n])
+    elif P == -1:
+        P = 5
+        n = 0
+        titles = {i: [] for i in range(P)}
+        A_groups : dict[str, list] = defaultdict(list)
+        for cluster in clusters:
+            if cluster is None:
+                none += 1
+                continue
+            title = cluster.get("title")
+            id = cluster.get("clusterId")
+            id_sliced = id[-15:]
+            first_char = title[0].lower() if title[0].isalpha() else "#"
+            A_groups[first_char].append((id_sliced, title))
+            
+            for _, items in A_groups.items():
+                smallest_group = min(titles, key=lambda k: len(titles[k]))
+                titles[smallest_group].extend(items)
     else:
         P -= 1
         n = 0
@@ -77,7 +95,7 @@ def separate_clusters(clusters: list, batch_length: int, P: int = 0) -> dict: # 
             title = cluster.get("title")
             id = cluster.get("clusterId")
             id_sliced = id[-15:]
-            if len(titles[n]) >= 50:
+            if len(titles[n]) >= batch_length:
                 if n == P:
                     n = -1
                 titles[n + 1].append((id_sliced, title))
@@ -124,12 +142,15 @@ def A_call_llm(cluster_list: list, prompt: str, retry: int = 2, delay: float = 5
     for model in CLAUDE_MODELS:
         for attempt in range(retry):
             try:
-                response = client_claude.messages.create(
+                with client_claude.messages.stream(
                     model=model,
-                    max_tokens=16384,
+                    max_tokens=64000,
                     messages=[{"role": "user", "content": Prompt}]
-                )
-                text = response.content[0].text.strip()
+                ) as stream:
+                    for _ in stream.text_stream:
+                        pass
+                    final_message = stream.get_final_message()
+                text = final_message.content[0].text.strip()
                 O_tokens = count_tokens(text)
                 with volta_lock:
                     tot_O_tokens += O_tokens
@@ -264,7 +285,8 @@ def merge_clusters(doc_clusters: list, to_merge: list[list], version : int = 0, 
     return N_clusters
 
 def check_ground_truth(clusters: list, gt: dict) -> dict:
-   
+
+    none_cluster = 0
     t_positivo = 0
     f_positivo = 0
     f_negativo = 0
@@ -272,8 +294,12 @@ def check_ground_truth(clusters: list, gt: dict) -> dict:
     titles_seen = set()
 
     for c in clusters:
-        title = c.get("title").lower()
-        mentions = c.get("mentions", [])
+        if c is None:
+            none_cluster += 1
+            continue
+        else:
+            title = c.get("title")
+            mentions = c.get("mentions", [])
 
         gt_mentions = gt.get(title)
 
@@ -282,13 +308,13 @@ def check_ground_truth(clusters: list, gt: dict) -> dict:
             with Path(ERRORS_PATH).open("a", encoding="utf-8") as f:
                 f.write(f"titolo '{title}' non presente nella Ground Truth:\n")
                 for m in mentions:
-                    f.write(f"  Menzione: {(m.get('id'), m.get('start'), m.get('end'), m.get('text'))}\n")
+                    f.write(f"  Menzione: {(m.get('id'), m.get('text'))}\n")
             continue
 
         titles_seen.add(title)
 
-        gt_keys = {(m.get("id"), m.get("start"), m.get("end"), m.get("text")) for m in gt_mentions}
-        cluster_keys = {(m.get("id"), m.get("start"), m.get("end"), m.get("text")) for m in mentions}
+        gt_keys = {(m.get("id"), m.get("text")) for m in gt_mentions}
+        cluster_keys = {(m.get("id"), m.get("text")) for m in mentions}
 
         # true positive: presenti sia nel cluster che nella GT per questo titolo
         tp_keys = cluster_keys & gt_keys
@@ -319,7 +345,7 @@ def check_ground_truth(clusters: list, gt: dict) -> dict:
             with Path(ERRORS_PATH).open("a", encoding="utf-8") as f:
                 f.write(f"titolo '{title}' presente nella GT ma mai comparso come titolo di alcun cluster nell'output:\n")
                 for m in gt_mentions:
-                    f.write(f"  Menzione attesa: {(m.get('id'), m.get('start'), m.get('end'), m.get('text'))}\n")
+                    f.write(f"  Menzione attesa: {(m.get('id'), m.get('text'))}\n")
 
     precision = t_positivo / (t_positivo + f_positivo) if (t_positivo + f_positivo) else 0.0
     recall = t_positivo / (t_positivo + f_negativo) if (t_positivo + f_negativo) else 0.0
@@ -357,11 +383,26 @@ def run(input_path: str, batch_to_be_combined: int, batch_length: int, output_pa
         print("incomicio lavoro su doc:", doc_id)
         workers = len(clusters_lists.keys())
         print("batch: ", workers)
-        to_merge: list[list] = process_clusters_parallel(clusters_lists, workers)
-        document_clusters = Sep_D[doc_id]
-        merged_clusters : list = merge_clusters(document_clusters, to_merge, doc_id = doc_id)
-        Merged_documents.extend(merged_clusters)
-    
+        if workers == 1:
+            to_merge: list[list] = process_clusters_parallel(clusters_lists, workers)
+            document_clusters = Sep_D[doc_id]
+            merged_clusters : list = merge_clusters(document_clusters, to_merge, doc_id = doc_id)
+            Merged_documents.extend(merged_clusters)
+        else:
+            while True:
+                to_merge: list[list] = process_clusters_parallel(clusters_lists, workers)
+                document_clusters = Sep_D[doc_id]
+                merged_clusters : list = merge_clusters(document_clusters, to_merge, doc_id = doc_id)
+                Merged_documents.extend(merged_clusters)
+                
+                if workers == 1:
+                    break
+                workers = workers // batch_to_be_combined
+                print("nuovo numero di batch: ", workers)
+                clusters_lists = separate_clusters(merged_clusters, batch_length, P = workers)
+
+    random.shuffle(Merged_documents)
+
     Sep_A_C: dict[int, list[tuple[str, str]]] = separate_clusters(Merged_documents, batch_length)
            # dict[batch_number, list[tuple[id, clutser_title]]]
     
@@ -374,8 +415,11 @@ def run(input_path: str, batch_to_be_combined: int, batch_length: int, output_pa
     Merged_All: list = Merged_A_Documents
 
     deepness = 0
-    while to_merge != []:
-        deepness += 1
+    while True:
+        if deepness == 3 and workers >= 3:
+            break
+        else:
+            deepness += 1
         workers = workers // batch_to_be_combined
         print("workers: ", workers)
         new_Sep_A_C: dict[int, list[tuple[str, str]]] = separate_clusters(Merged_A_Documents, batch_length, P = workers)
@@ -383,10 +427,19 @@ def run(input_path: str, batch_to_be_combined: int, batch_length: int, output_pa
         to_merge: list[list] = process_clusters_parallel(new_Sep_A_C, workers)
         merged_A_clusters: list = merge_clusters(Merged_A_Documents, to_merge, version = 1)
         Merged_A_Documents = merged_A_clusters
+        random.shuffle(Merged_A_Documents)
         if workers == 1:
             print("singolo gruppo raggiunto")
-            to_merge.clear()
             Merged_All = Merged_A_Documents
+            break
+
+    if workers >= 3:
+        Merged_A_Documents.sort(key=lambda c: c.get("title"))
+        new_Sep_A_C : dict[int, list[tuple[str, str]]] = separate_clusters(Merged_A_Documents, batch_length=10000, P = -1)
+        to_merge : list[list] = process_clusters_parallel(new_Sep_A_C, max_workers = 5)
+        merged_A_clusters : list = merge_clusters(Merged_A_Documents, to_merge, version = 1)
+        Merged_All = merged_A_clusters
+
     print("profondità del merge: ", deepness)
 
     with Path(ERRORS_PATH).open("a", encoding="utf-8") as f:
