@@ -17,10 +17,7 @@ ERRORS_PATH = r"D:\Tesi PY\errors\errori.txt"
 MODELS = ["gemini-3.5-flash", "gemini-3.1-flash-lite", "gemini-3-flash-preview"]
 CLAUDE_MODELS = ["claude-haiku-4-5-20251001", "claude-sonnet-5", "claude-opus-4-8"]  # dal più economico al più capace
 
-prompt = """I tuo compito è quello di verificare che due stringhe siano riferite ad una stessa entità, usando le parole prime e dopo la seconda stringa.
-In Input hai una lista di Cluster, e le menzioni di ogni clutser, cioè le ricorrenze dell'entità del cluster:
-verifica l'appartenenza di ogni menzione comparando title dei cluster e text delle menzioni
-usando anche, se c'è, il context delle menzioni che presenta le parole prima e dopo al text.
+prompt = """Devi verificare che le menzioni dei cluster si riferiscano correttamente al cluster in cui si trovano.
 In output crea un dict(str, list), la lista di interi, e inserisci:
 in ELIMINARE le menzioni il cui text NON è presente nel proprio context, se c'è. 
 in SPOSTARE le menzioni il cui text è giusto ma NON si rifersice al cluster in cui si trova.
@@ -36,8 +33,8 @@ Tot_Gt = 0
 modello_corrente = 0
 tot_I_tokens = 0
 tot_O_tokens = 0
-client = genai.Client(api_key="")
-client_claude = anthropic.Anthropic(api_key="")
+client = genai.Client(api_key="genai_key")
+client_claude = anthropic.Anthropic(api_key="anthropic_key")
 _encoder = tiktoken.get_encoding("cl100k_base")
 
 def count_tokens(text: str) -> int:
@@ -56,20 +53,27 @@ def separate_doc(clusters: list) -> dict[str, list]:   # separa i cluster per do
 
     return doc_clusters
 
-def separate_clusters(clusters: list, batch_length: int) -> dict[int, list]: # separa le singole menzioni
+def separate_clusters(clusters: list, batch_length: int, NER_type: bool, with_context: bool ) -> dict[int, list]:
 
     mentions: dict[int, list] = defaultdict(list)
     n = 0
     for cluster in clusters:
-        if len(cluster) > batch_length - len(mentions[n]):
+        if not NER_type:
+            del cluster["type"]
+        for mention in cluster.get("mentions"):
+            del mention["start"]
+            del mention["end"]
+            del mention["url"]
+            if not with_context:
+                del mention["context"]
+        if  len(mentions[n]) >= batch_length:
             n += 1
-            mentions[n].append(cluster)
-        else:
-            mentions[n].append(cluster)
+        mentions[n].append(cluster)
+
     print("numero di batch: ", n)
     return mentions
 
-def process_clusters_parallel(Sep_C: dict[str, list], max_workers: int) -> dict[str, list]:
+def process_clusters_parallel(Sep_C: dict[int, list], max_workers: int) -> dict[str, list]:
 
     print("inizio process_cluster_parallel")
 
@@ -77,9 +81,9 @@ def process_clusters_parallel(Sep_C: dict[str, list], max_workers: int) -> dict[
 
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         tasks = {}
-        for S_type, cluster_list in Sep_C.items():
+        for batch, cluster_list in Sep_C.items():
             future_obj = executor.submit(A_call_llm, cluster_list, prompt)
-            tasks[future_obj] = (S_type)
+            tasks[future_obj] = (batch)
 
         for task in as_completed(tasks):
             try:
@@ -109,7 +113,6 @@ def A_call_llm(cluster_list: list, prompt: str, retry: int = 10, delay: float = 
     for model in CLAUDE_MODELS:
         for attempt in range(retry):
             try:
-                print(f"chiamata modello: {model} tentativo: {attempt + 1}")
                 response = client_claude.messages.create(
                         model=model,
                         max_tokens=4096,
@@ -333,20 +336,7 @@ def run(input_path: str, context: bool, NER_type: bool, batch_length: int, outpu
 
     Sep_D: dict[str, list] = separate_doc(clusters)
 
-    Sep_C: dict[str, dict[int, list]] = {doc_id: separate_clusters(clusters, batch_length) for doc_id, clusters in Sep_D.items()}
-
-    if not(context):
-        for doc_id, batches in Sep_C.items():
-            for _, clusters_list in batches.items():
-                for cluster in clusters_list:
-                    for mention in cluster["mentions"]:
-                        del mention["context"]
-
-    if not(NER_type):
-        for doc_id, batches in Sep_C.items():
-            for _, clusters_list in batches.items():
-                for cluster in clusters_list:
-                    del cluster["type"]
+    Sep_C: dict[str, dict[int, list]] = {doc_id: separate_clusters(clusters, batch_length, NER_type, context) for doc_id, clusters in Sep_D.items()}
                     
     Cleaned_documents: list = []
 
@@ -355,7 +345,7 @@ def run(input_path: str, context: bool, NER_type: bool, batch_length: int, outpu
 
     for doc_id, clusters_lists in Sep_C.items():
         print("incomicio lavoro su doc:", doc_id)
-        workers = len(clusters_lists)
+        workers = len(clusters_lists.keys())
         to_change: dict[str, list] = process_clusters_parallel(clusters_lists, workers)
 
         document_clusters = Sep_D[doc_id]
@@ -382,3 +372,6 @@ def run(input_path: str, context: bool, NER_type: bool, batch_length: int, outpu
     print(f"Tempo di CLEAN_CLUSTERS: {(fine - inizio)/60:.2f} minuti")
 
     return O
+
+if __name__ == "__main__" :
+    run(r"D:\Tesi PY\data\Cluster_Da_Pullire.json", context = True, NER_type = True, batch_length = 10)
