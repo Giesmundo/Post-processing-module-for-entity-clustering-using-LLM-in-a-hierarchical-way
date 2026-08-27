@@ -381,4 +381,4 @@ def run(input_path: str, context: bool, NER_type: bool, batch_length: int, outpu
     return O
 
 if __name__ == "__main__" :
-    run(r"D:\Tesi PY\doc1.json", context = True, NER_type = True, batch_length = 10)
+    run(r"D:\Tesi PY\data\Cluster_Da_Pullire.json", context = True, NER_type = True, batch_length = 10)
