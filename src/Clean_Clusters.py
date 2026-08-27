@@ -7,13 +7,14 @@ from collections import defaultdict
 import anthropic
 from google import genai
 import tiktoken
+import copy
 
 volta_lock = threading.Lock() #DEBUG
 volta = 0                     #DEBUG
 
 OUTPUT_PATH = r"D:\Tesi PY\output\Clusters_Puliti.json"
 GROUND_TRUTH = r"D:\Tesi PY\Ground_truth\C_GROUND_TRUTH_O.json"
-ERRORS_PATH = r"D:\Tesi PY\errors\errori.txt"
+ERRORS_PATH = r"D:\Tesi PY\errors\errori_clean.json"
 MODELS = ["gemini-3.5-flash", "gemini-3.1-flash-lite", "gemini-3-flash-preview"]
 CLAUDE_MODELS = ["claude-haiku-4-5-20251001", "claude-sonnet-5", "claude-opus-4-8"]  # dal più economico al più capace
 
@@ -33,8 +34,8 @@ Tot_Gt = 0
 modello_corrente = 0
 tot_I_tokens = 0
 tot_O_tokens = 0
-client = genai.Client(api_key="genai_key")
-client_claude = anthropic.Anthropic(api_key="anthropic_key")
+client = genai.Client(api_key="gemini key")
+client_claude = anthropic.Anthropic(api_key="anthropic key")
 _encoder = tiktoken.get_encoding("cl100k_base")
 
 def count_tokens(text: str) -> int:
@@ -42,34 +43,32 @@ def count_tokens(text: str) -> int:
 
 def separate_doc(clusters: list) -> dict[str, list]:   # separa i cluster per doumento
 
-    print("inizio separate_doc")
-
     doc_clusters: dict[str, list] = defaultdict(list)
     for c in clusters:
         doc_id = c.get("originalDocId")
         doc_clusters[doc_id].append(c)
-
-    print("fine separate_doc")
-
     return doc_clusters
 
-def separate_clusters(clusters: list, batch_length: int, NER_type: bool, with_context: bool ) -> dict[int, list]:
+def separate_clusters(clusters: list, batch_length: int, NER_type: bool, with_context: bool) -> dict[int, list]:
 
     mentions: dict[int, list] = defaultdict(list)
     n = 0
     for cluster in clusters:
-        if not NER_type:
-            del cluster["type"]
-        for mention in cluster.get("mentions"):
-            del mention["start"]
-            del mention["end"]
-            del mention["url"]
-            if not with_context:
-                del mention["context"]
-        if  len(mentions[n]) >= batch_length:
-            n += 1
-        mentions[n].append(cluster)
-
+        if cluster is not None:
+            del cluster["originalDocId"]
+            del cluster["clusterId"]
+            if not NER_type:
+                del cluster["type"]
+            for mention in cluster.get("mentions"):
+                if mention is not None:
+                    del mention["start"]
+                    del mention["end"]
+                    del mention["url"]
+                    if not with_context:
+                        del mention["context"]
+            if len(mentions[n]) >= batch_length:
+                n += 1
+            mentions[n].append(cluster)
     print("numero di batch: ", n)
     return mentions
 
@@ -247,14 +246,25 @@ def clean_clusters(cluster_list: list, to_change: dict[str, list], NER_type: boo
     print("fine clean_cluster")
     return cluster_list
 
-def check_ground_truth(doc_id: str, to_change: dict[str, list], gt: dict):
+def check_ground_truth(doc_id: str, cluster_list: list, to_change: dict[str, list], gt: dict):
 
+    def get_text(ids):
+        for cluster in cluster_list:
+            for m in cluster.get("mentions"):
+                if m.get("id") == ids:
+                    return m.get("text")
+                
     global Tot_Predette
     global Tot_Corrette
     global Tot_Gt
+    
     print("inizio check_ground_truth")
-    with Path(ERRORS_PATH).open("a", encoding="utf-8") as f:
-        f.write(f"Errori per documento: {doc_id}\n")
+
+    with Path(ERRORS_PATH).open(encoding="utf-8") as f:
+        errori = json.load(f)
+    for categoria in ("Non da eliminare", "Non da spostare", "Era da eliminare", "Era da spostare"):
+        errori.setdefualt(doc_id, {}).setdefault(categoria, {})
+
     falso_positivo_E = 0
     vero_positivo_E = 0
     falso_negativo_E = 0
@@ -272,30 +282,32 @@ def check_ground_truth(doc_id: str, to_change: dict[str, list], gt: dict):
             vero_positivo_E += 1
         else:
             falso_positivo_E += 1
-            with Path(ERRORS_PATH).open("a", encoding="utf-8") as f:
-                f.write(f"Errore ELIMINARE: menzione {e_ids} non era da eliminare.\n")
+            key = f"{e_ids}_{get_text(e_ids)}"
+            errori[doc_id]["Non da eliminare"][key] = errori[doc_id]["Non da eliminare"].get(key, 0) + 1
 
     for s_ids in sposta_ids:
         if s_ids in gt_sposta:
             vero_positivo_S += 1
         else:
             falso_positivo_S += 1
-            with Path(ERRORS_PATH).open("a", encoding="utf-8") as f:
-                f.write(f"Errore SPOSTARE: menzione {s_ids} non era da spostare.\n")
+            key = f"{s_ids}_{get_text(s_ids)}"
+            errori[doc_id]["Non da spostare"][key] = errori[doc_id]["Non da spostare"].get(key, 0) + 1
 
     falso_negativo_E = len(gt_elimina) - vero_positivo_E
     falso_negativo_S = len(gt_sposta) - vero_positivo_S
 
     for e_ids in gt_elimina:
         if e_ids not in elimina_ids:
-            with Path(ERRORS_PATH).open("a", encoding="utf-8") as f:
-                f.write(f"Errore ELIMINARE: menzione {e_ids} era da eliminare ma non è stata eliminata.\n")
+            key = f"{e_ids}_{get_text(s_ids)}"
+            errori[doc_id]["Era da eliminare"][key] = errori[doc_id]["Era da eliminare"].get(key, 0) + 1
 
     for s_ids in gt_sposta:
         if s_ids not in sposta_ids:
-            with Path(ERRORS_PATH).open("a", encoding="utf-8") as f:
-                f.write(f"Errore SPOSTARE: menzione {s_ids} era da spostare ma non è stata spostata.\n")
+            key = f"{s_ids}_{get_text(s_ids)}"
+            errori[doc_id]["Era da spostare"][key] = errori[doc_id]["Era da spostare"].get(key, 0) + 1
 
+    with Path(ERRORS_PATH).open("w", encoding="utf-8") as f:
+        json.dump(errori, f, ensure_ascii=False, indent=2)
     print("menzioni spostate correttamente: ", vero_positivo_S, " su", len(gt_sposta))
     print("menzioni eliminate correttamente: ", vero_positivo_E, " su", len(gt_elimina))
     print("menzioni spostate erroneamente: ", falso_positivo_S)
@@ -336,24 +348,19 @@ def run(input_path: str, context: bool, NER_type: bool, batch_length: int, outpu
 
     Sep_D: dict[str, list] = separate_doc(clusters)
 
-    Sep_C: dict[str, dict[int, list]] = {doc_id: separate_clusters(clusters, batch_length, NER_type, context) for doc_id, clusters in Sep_D.items()}
-                    
-    Cleaned_documents: list = []
+    copy_Sep_D = copy.deepcopy(Sep_D)
 
-    with Path(ERRORS_PATH).open("a", encoding="utf-8") as f:
-        f.write("-------------------------OPERAZIONE DI PULIZIA--------------------------\n")
+    Sep_C: dict[str, dict[int, list]] = {doc_id: separate_clusters(clusters, batch_length, context, NER_type) for doc_id, clusters in copy_Sep_D.items()}
+
+    Cleaned_documents: list = []
 
     for doc_id, clusters_lists in Sep_C.items():
         print("incomicio lavoro su doc:", doc_id)
         workers = len(clusters_lists.keys())
         to_change: dict[str, list] = process_clusters_parallel(clusters_lists, workers)
-
         document_clusters = Sep_D[doc_id]
-
-        check_ground_truth(doc_id, to_change, gt)
-
+        check_ground_truth(doc_id, document_clusters, to_change, gt)
         Cleaned_clusters = clean_clusters(document_clusters, to_change, NER_type)
-
         Cleaned_documents.extend(Cleaned_clusters)
 
     precision = (Tot_Corrette / Tot_Predette * 100) if Tot_Predette > 0 else 0
@@ -374,4 +381,4 @@ def run(input_path: str, context: bool, NER_type: bool, batch_length: int, outpu
     return O
 
 if __name__ == "__main__" :
-    run(r"D:\Tesi PY\data\Cluster_Da_Pullire.json", context = True, NER_type = True, batch_length = 10)
+    run(r"D:\Tesi PY\doc1.json", context = True, NER_type = True, batch_length = 10)
