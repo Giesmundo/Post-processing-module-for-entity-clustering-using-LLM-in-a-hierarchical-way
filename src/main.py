@@ -1,8 +1,6 @@
 import Clean_Clusters as Clean_Clusters
 import Merge_Clusters as Merge_Clusters
 import time
-from pathlib import Path
-import json
 
 inizio = time.perf_counter()
 with open(r"D:\Tesi PY\errors\errori.txt", "w") as f:
